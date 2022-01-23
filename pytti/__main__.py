@@ -1,4 +1,4 @@
-import click, gc, glob, json, math, os, pprint, random, subprocess, re, types, warnings
+import click, os, pprint, random, re, types
 from PIL import Image
 import torch as th
 from pytti.guide import ImageGuide
@@ -28,13 +28,14 @@ from neurpy.util import enforce_reproducibility
 @click.option(           '--init_image', default=None,     type=str)
 @click.option(           '--init_video', default=None,     type=str)
 # run duration
-@click.option(                '--steps', default=2**13,    type=int, help='total steps per scene.')
+@click.option(                '--steps', default=2**8,     type=int, help='total steps per scene.')
 @click.option(      '--steps_per_frame', default=50,       type=int, help='image model steps per frame.')
 @click.option(         '--interp_steps', default=0,        type=int, help='interpolation steps per frame.')
 @click.option(                  '--fps', default=12,       type=int, help='frames per second.')
 # optimization parameters
 @click.option(                   '--lr', default=0.1,      type=float)
 @click.option(             '--reset_lr', default=True,     type=bool)
+@click.option(            '--ema_decay', default=0.99,      type=float)
 # image model
 @click.option(            '--generator', default='vqgan_imagenet_f16_16384',
 type=click.Choice(['vqgan_imagenet_f16_16384', 'vqgan_wikiart_f16_16384']))
@@ -50,6 +51,12 @@ type=click.Choice(['vqgan_imagenet_f16_16384', 'vqgan_wikiart_f16_16384']))
 @click.option('--palette_normalization', default=2e-1,     type=float)
 @click.option(                '--gamma', default=1,        type=float)
 @click.option(           '--hdr_weight', default=1e-2,     type=float)
+# latent initialization
+@click.option(                 '--init', default='random', type=str)
+@click.option(       '--perlin_octaves', default=2**3,     type=int)
+@click.option(        '--perlin_weight', default=22e-2,    type=float)
+@click.option(      '--pyramid_octaves', default=2**2,     type=int)
+@click.option(        '--pyramid_decay', default=99e-2,    type=float)
 # image subsampling
 @click.option(           '--perceptors', default=['ViT-B/32','ViT-B/16','RN50x4'],
 type=click.Choice(['ViT-B/32','ViT-B/16','RN50','RN50x4','RN50x16','RN101']), multiple=True)
@@ -70,7 +77,7 @@ type=click.Choice(['ViT-B/32','ViT-B/16','RN50','RN50x4','RN50x16','RN101']), mu
 @click.option(          '--translate_x', default='256 * sin(pi + t)')
 @click.option(          '--translate_y', default=' 32 * cos(pi + t)')
 @click.option(          '--translate_z', default='(50 + pi * t) * sin(t / 2 * pi)**2', help='only used if `animate` == `3D`.')
-@click.option(            '--rotate_3d', default='[1, 0, 0, 7e-3]', help=\
+@click.option(            '--rotate_3d', default='[1, 0, 0, 0]', help=\
 'must be a [w,x,y,z] rotation (unit) quaternion. use `--rotate_3d=[1,0,0,0]` for no rotation.')
 @click.option(            '--rotate_2d', default='0')
 @click.option(            '--zoom_x_2d', default='0')
@@ -117,12 +124,13 @@ def run(ctx, **args):
     # load generator
     if conf.palette == 'vqgan':
         vqgan = load(conf.generator, image_size=(conf.h, conf.w))[0]
-        img = VQGANImage(conf.w, conf.h, conf.pixel_size, model=vqgan.model)
-        img.encode_random()
+        img = VQGANImage(conf.w, conf.h, model=vqgan.model, lr=conf.lr, ema_decay=conf.ema_decay)
+        img.encode_random(conf.init, perlin_weight=conf.perlin_weight, perlin_octaves=conf.perlin_octaves,
+        pyramid_octaves=conf.pyramid_octaves, pyramid_decay=conf.pyramid_decay)
         conf.pixel_size = 1
 
     elif conf.palette == 'unlimited':
-        img = RGBImage(conf.w, conf.h, conf.pixel_size)
+        img = RGBImage(conf.w, conf.h)
         img.encode_random()
 
     elif conf.palette == 'limited':
